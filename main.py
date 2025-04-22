@@ -1,10 +1,11 @@
 import io
-from typing import List
+from typing import List, Optional
 import marvin
 import pynput
 from PIL import ImageGrab
 import pydantic
 import pync
+
 
 class MultipleChoiceResponse(pydantic.BaseModel):
     """
@@ -31,10 +32,37 @@ class MultipleChoiceResponse(pydantic.BaseModel):
         self.answer = sorted(self.answer)
         if self.is_single_answer:
             if len(self.answer) != 1:
-                raise ValueError("If 'is_single_answer' is True, 'answer' must contain exactly one item.")
+                raise ValueError(
+                    "If 'is_single_answer' is True, 'answer' must contain exactly one item."
+                )
             if self.is_multiple_answer:
-                raise ValueError("'is_multiple_answer' must be False when 'is_single_answer' is True.")
+                raise ValueError(
+                    "'is_multiple_answer' must be False when 'is_single_answer' is True."
+                )
         return self
+
+
+class ProgrammingProblemResponse(pydantic.BaseModel):
+    """
+    Model containing the analysis of a programming problem and its solution.
+    """
+
+    problem_description: str = pydantic.Field(
+        ..., description="Detailed description of the programming problem."
+    )
+    required_output_format: Optional[str] = pydantic.Field(
+        None, description="Required output format if specified in the problem."
+    )
+    required_function_name: Optional[str] = pydantic.Field(
+        None, description="Required function name if specified in the problem."
+    )
+    solution_code: str = pydantic.Field(
+        ..., description="Python code solution to the problem."
+    )
+    explanation: str = pydantic.Field(
+        ..., description="Explanation of the solution approach."
+    )
+
 
 def get_multiple_choice_response(image) -> MultipleChoiceResponse:
     img_bytes = io.BytesIO()
@@ -42,27 +70,49 @@ def get_multiple_choice_response(image) -> MultipleChoiceResponse:
     img = marvin.Image(data=img_bytes.getvalue())
     return marvin.cast(img, target=MultipleChoiceResponse)
 
-def notify(message: str, title: str = "Gorilla Test 🦍"):
-    pync.Notifier.notify(message, title=title)
+
+def get_programming_problem_response(image) -> ProgrammingProblemResponse:
+    img_bytes = io.BytesIO()
+    image.save(img_bytes, format="PNG")
+    img = marvin.Image(data=img_bytes.getvalue())
+    return marvin.cast(img, target=ProgrammingProblemResponse)
+
 
 def on_press(key):
     if key == pynput.keyboard.Key.alt_l:
         notify("Processing question... 🤔")
         try:
             image = ImageGrab.grab()
-            response = get_multiple_choice_response(image)
-            print(response)
-            answer = response.answer[0] if response.is_single_answer else ", ".join(map(str, response.answer))
-            notify(f"Answer: {answer}")
+            try:
+                # First try to process as multiple choice
+                response = get_multiple_choice_response(image)
+                print(response)
+                answer = (
+                    response.answer[0]
+                    if response.is_single_answer
+                    else ", ".join(map(str, response.answer))
+                )
+                notify(f"Answer: {answer}")
+            except Exception:
+                # If multiple choice fails, try programming problem
+                response = get_programming_problem_response(image)
+                print(response)
+                notify(f"Solution: {response.solution_code}")
         except Exception as e:
             print(f"Error: {e}")
             notify("An error occurred")
+
+
+def notify(message: str, title: str = "Gorilla Test 🦍"):
+    pync.Notifier.notify(message, title=title)
+
 
 def main():
     print("Listening for keypresses...")
     notify("Script started")
     with pynput.keyboard.Listener(on_press=on_press) as listener:
         listener.join()
+
 
 if __name__ == "__main__":
     main()
