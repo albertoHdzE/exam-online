@@ -1,10 +1,13 @@
 import io
 from typing import List, Optional
-import marvin
 import pynput
-from PIL import ImageGrab
+from PIL import ImageGrab, Image
 import pydantic
 import pync
+import base64
+from ollama import Client
+import os
+import pytesseract  # Import pytesseract
 
 
 class MultipleChoiceResponse(pydantic.BaseModel):
@@ -64,18 +67,72 @@ class ProgrammingProblemResponse(pydantic.BaseModel):
     )
 
 
+def image_to_base64(image: Image) -> str:
+    img_bytes = io.BytesIO()
+    image.save(img_bytes, format="PNG")
+    return base64.b64encode(img_bytes.getvalue()).decode("utf-8")
+
+
 def get_multiple_choice_response(image) -> MultipleChoiceResponse:
-    img_bytes = io.BytesIO()
-    image.save(img_bytes, format="PNG")
-    img = marvin.Image(data=img_bytes.getvalue())
-    return marvin.cast(img, target=MultipleChoiceResponse)
+    client = Client(host="http://localhost:11434")
+    base64_image = image_to_base64(image)
+
+    prompt = """You must respond ONLY with a valid JSON object in the following format, no other text:
+    {
+        "explanation_of_question": "Explanation of the test question",
+        "reasoning": "Your reasoning for the answer",
+        "is_single_answer": true,
+        "is_multiple_answer": false,
+        "answer": [1]
+    }
+    Analyze the image and fill in appropriate values, maintaining this exact JSON structure."""
+
+    response = client.generate(
+        model="deepseek-coder-v2",
+        prompt=prompt,
+        images=[base64_image],
+        format="json",  # Add this parameter to request JSON output
+    )
+
+    # Add error handling for JSON parsing
+    try:
+        return MultipleChoiceResponse.model_validate_json(response.response)
+    except Exception as e:
+        print(f"Raw response: {response.response}")
+        raise e
 
 
-def get_programming_problem_response(image) -> ProgrammingProblemResponse:
-    img_bytes = io.BytesIO()
-    image.save(img_bytes, format="PNG")
-    img = marvin.Image(data=img_bytes.getvalue())
-    return marvin.cast(img, target=ProgrammingProblemResponse)
+def get_programming_problem_response(
+    image, extracted_text
+) -> ProgrammingProblemResponse:
+    client = Client(host="http://localhost:11434")
+    base64_image = image_to_base64(image)
+
+    # Update the prompt to deduce the programming language
+    prompt = """You must respond ONLY with a valid JSON object in the following format, no other text:
+    {
+        "problem_description": "The programming problem asks...",
+        "required_output_format": null,
+        "required_function_name": null,
+        "programming_language": "Try to deduce the target programming language based on context and extracted text. If not possible, default to Python.",
+        "solution_code": "def solution():\\n    pass",  # Ensure this is a valid string
+        "explanation": "This solution works by..."
+    }
+    Analyze the image and fill in appropriate values, maintaining this exact JSON structure."""
+
+    response = client.generate(
+        model="deepseek-coder-v2",
+        prompt=prompt,
+        images=[base64_image],
+        format="json",  # Add this parameter to request JSON output
+    )
+
+    # Add error handling for JSON parsing
+    try:
+        return ProgrammingProblemResponse.model_validate_json(response.response)
+    except Exception as e:
+        print(f"Raw response: {response.response}")
+        raise e
 
 
 def on_press(key):
@@ -83,24 +140,57 @@ def on_press(key):
         notify("Processing question... 🤔")
         try:
             image = ImageGrab.grab()
+            # Debug: Show and save the captured image
+            show_debug_image(image)
             try:
-                # First try to process as multiple choice
-                response = get_multiple_choice_response(image)
-                print(response)
-                answer = (
-                    response.answer[0]
-                    if response.is_single_answer
-                    else ", ".join(map(str, response.answer))
-                )
-                notify(f"Answer: {answer}")
-            except Exception:
-                # If multiple choice fails, try programming problem
-                response = get_programming_problem_response(image)
-                print(response)
-                notify(f"Solution: {response.solution_code}")
+                # Extract text from the image
+                extracted_text = extract_text_from_image(image)
+                print(f"Extracted Text: {extracted_text}")
+
+                # Determine the type of question based on extracted text
+                if (
+                    "choice" in extracted_text.lower()
+                    or "select" in extracted_text.lower()
+                ):
+                    # Process as multiple choice
+                    response = get_multiple_choice_response(image)
+                    print(response)
+                    answer = (
+                        response.answer[0]
+                        if response.is_single_answer
+                        else ", ".join(map(str, response.answer))
+                    )
+                    notify(f"Answer: {answer}")
+                elif (
+                    "function" in extracted_text.lower()
+                    or "code" in extracted_text.lower()
+                ):
+                    # Process as programming problem
+                    response = get_programming_problem_response(image, extracted_text)
+                    print(response)
+                    notify(f"Solution: {response.solution_code}")
+                else:
+                    notify("Could not determine question type")
+            except Exception as e:
+                print(f"Error: {e}")
+                notify("An error occurred")
         except Exception as e:
             print(f"Error: {e}")
             notify("An error occurred")
+
+
+def show_debug_image(image: Image):
+    """Display the captured image and save it"""
+    # Save the image in the root directory
+    image_path = "screenshot.png"
+    image.save(image_path)
+    # image.show()
+    print(f"Image saved as: {image_path}")
+
+
+def extract_text_from_image(image: Image) -> str:
+    """Extract text from an image using Tesseract OCR."""
+    return pytesseract.image_to_string(image)
 
 
 def notify(message: str, title: str = "Gorilla Test 🦍"):
