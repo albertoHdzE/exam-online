@@ -17,6 +17,7 @@ load_dotenv()
 
 # Configuration
 PLAY_LOCAL = False  # Set to True for local mode, False for online mode
+DEBUG_LOGS = False  # Set to True to print raw OCR/API debug information
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")  # DeepSeek API key for online mode
 DEEPSEEK_API_URL = (
     "https://api.deepseek.com/v1/chat/completions"  # DeepSeek API endpoint
@@ -52,7 +53,8 @@ class MultipleChoiceResponse(pydantic.BaseModel):
     )
     answer: List[int] = pydantic.Field(
         ...,
-        description="Answer(s) to the question. Single value for single-answer (e.g., [3]), multiple values for multi-answer (e.g., [2, 4, 5]).",
+        description="Answer(s) to the question. Single value for single-answer (e.g., [3]), \
+        multiple values for multi-answer (e.g., [2, 4, 5]).",
     )
 
     @pydantic.model_validator(mode="after")
@@ -68,6 +70,47 @@ class MultipleChoiceResponse(pydantic.BaseModel):
                     "'is_multiple_answer' must be False when 'is_single_answer' is True."
                 )
         return self
+
+
+class ProgrammingVersion(pydantic.BaseModel):
+    """
+    A single step in the progressive construction of a programming solution.
+    """
+
+    version_label: str = pydantic.Field(
+        ..., description="Label for the version, e.g. 'Version 1 - Initial attempt'."
+    )
+    change_summary: str = pydantic.Field(
+        ..., description="Short description of what changed from the previous version."
+    )
+    code: str = pydantic.Field(..., description="Code for this version.")
+    known_issue: Optional[str] = pydantic.Field(
+        None, description="Short description of the main issue still present."
+    )
+    is_correct: bool = pydantic.Field(
+        ...,
+        description="True only when this version is already correct. Usually false until the final version.",
+    )
+
+
+def validate_progressive_version_sequence(
+    versions: List[ProgrammingVersion], field_name: str
+) -> List[ProgrammingVersion]:
+    """Allow only the last progressive version to be marked as correct."""
+    if not 3 <= len(versions) <= 4:
+        raise ValueError(f"'{field_name}' must contain 3 or 4 versions.")
+
+    correct_indexes = [index for index, version in enumerate(versions) if version.is_correct]
+    if len(correct_indexes) > 1:
+        raise ValueError(
+            f"'{field_name}' can mark at most one version as correct."
+        )
+    if correct_indexes and correct_indexes[0] != len(versions) - 1:
+        raise ValueError(
+            f"Only the last item in '{field_name}' can be marked as correct."
+        )
+
+    return versions
 
 
 class ProgrammingProblemResponse(pydantic.BaseModel):
@@ -88,12 +131,23 @@ class ProgrammingProblemResponse(pydantic.BaseModel):
         ...,
         description="Target programming language, default to Python if not deducible.",
     )
+    progressive_versions: List[ProgrammingVersion] = pydantic.Field(
+        ...,
+        description="Three or four progressively improved versions of the solution.",
+    )
     solution_code: str = pydantic.Field(
-        ..., description="Code solution to the problem."
+        ..., description="Final correct code solution to the problem."
     )
     explanation: str = pydantic.Field(
-        ..., description="Explanation of the solution approach."
+        ..., description="Explanation of the progression and the final solution approach."
     )
+
+    @pydantic.model_validator(mode="after")
+    def validate_progressive_versions(self):
+        validate_progressive_version_sequence(
+            self.progressive_versions, "progressive_versions"
+        )
+        return self
 
 
 class GeneralProblemResponse(pydantic.BaseModel):
@@ -112,6 +166,10 @@ class GeneralProblemResponse(pydantic.BaseModel):
     programming_language: Optional[str] = pydantic.Field(
         None, description="Target programming language for programming problems."
     )
+    programming_versions: Optional[List[ProgrammingVersion]] = pydantic.Field(
+        None,
+        description="Three or four progressive versions for programming problems only.",
+    )
     explanation: str = pydantic.Field(
         ..., description="Explanation of the solution or reasoning."
     )
@@ -124,6 +182,87 @@ class GeneralProblemResponse(pydantic.BaseModel):
         None,
         description="True if multiple answers are allowed (for multiple-choice only).",
     )
+
+    @pydantic.model_validator(mode="after")
+    def validate_programming_fields(self):
+        if self.problem_type == "programming":
+            if not isinstance(self.solution, str):
+                raise ValueError("Programming solutions must be returned as a string.")
+            if not self.programming_language:
+                raise ValueError(
+                    "Programming problems must include 'programming_language'."
+                )
+            if not self.programming_versions or not (
+                3 <= len(self.programming_versions) <= 4
+            ):
+                raise ValueError(
+                    "Programming problems must include 3 or 4 'programming_versions'."
+                )
+            validate_progressive_version_sequence(
+                self.programming_versions, "programming_versions"
+            )
+        return self
+
+
+def debug_print(message: str):
+    """Print verbose debug information only when debugging is enabled."""
+    if DEBUG_LOGS:
+        print(message)
+
+
+def normalize_multiline_text(text: str) -> str:
+    """Convert escaped newlines to real ones and trim extra blank lines."""
+    return text.replace("\\n", "\n").strip("\n")
+
+
+def indent_block(text: str, spaces: int = 4) -> str:
+    """Indent a multiline block for cleaner console output."""
+    prefix = " " * spaces
+    normalized = normalize_multiline_text(text)
+    return "\n".join(f"{prefix}{line}" if line else "" for line in normalized.splitlines())
+
+
+def print_programming_response(
+    programming_language: str,
+    progressive_versions: List[ProgrammingVersion],
+    final_solution: str,
+    explanation: str,
+):
+    """Print a programming response using clearly separated progressive sections."""
+    print("----------------> Processing CODE QUESTION")
+    print("=" * 72)
+    print(f"Language: {programming_language}")
+    print(
+        "Progression: realistic human-style attempts, each one derived from the previous"
+    )
+    print("=" * 72)
+
+    for index, version in enumerate(progressive_versions, start=1):
+        print(f"\nVersion {index}: {version.version_label}")
+        print(f"Change: {version.change_summary}")
+        if version.is_correct:
+            print("Status: correct draft")
+        if version.known_issue:
+            print(f"Known issue: {version.known_issue}")
+        print("Code:")
+        print(indent_block(version.code))
+
+    print("\nFinal Correct Version")
+    print("-" * 72)
+    print(indent_block(final_solution))
+    print("\nExplanation:")
+    print(indent_block(explanation, spaces=2))
+    print("=" * 72)
+
+
+def is_trigger_key(key) -> bool:
+    """Accept the main modifier keys used to trigger capture on macOS."""
+    return key in {
+        pynput.keyboard.Key.cmd,
+        pynput.keyboard.Key.cmd_l,
+        pynput.keyboard.Key.cmd_r,
+        pynput.keyboard.Key.alt_l,
+    }
 
 
 def image_to_base64(image: Image) -> str:
@@ -176,10 +315,43 @@ def get_programming_problem_response(
         "required_output_format": null,
         "required_function_name": null,
         "programming_language": "Python",
+        "progressive_versions": [
+            {
+                "version_label": "Version 1 - Initial attempt",
+                "change_summary": "Starts from the basic idea, but still contains a realistic mistake.",
+                "code": "def solution():\\n    pass",
+                "known_issue": "The logic is incomplete or wrong in one realistic way.",
+                "is_correct": false
+            },
+            {
+                "version_label": "Version 2 - Improved attempt",
+                "change_summary": "Builds directly on version 1 and fixes part of the issue.",
+                "code": "def solution():\\n    pass",
+                "known_issue": "Still misses an edge case or requirement.",
+                "is_correct": false
+            },
+            {
+                "version_label": "Version 3 - Almost correct",
+                "change_summary": "Builds directly on version 2 and is close to the final answer.",
+                "code": "def solution():\\n    pass",
+                "known_issue": "Minor remaining issue before the final correct version.",
+                "is_correct": false
+            }
+        ],
         "solution_code": "def solution():\\n    pass",
-        "explanation": "This solution works by..."
+        "explanation": "Explain the progression and why the final version is correct."
     }
-    Analyze the image and fill in appropriate values, maintaining this exact JSON structure."""
+    Instructions:
+    - Return 3 or 4 progressive_versions depending on problem complexity.
+    - Each version must be clearly based on the previous one, not a full rewrite.
+    - Early versions must contain minor realistic human mistakes or missing edge cases.
+    - The final solution_code must be correct.
+    - Avoid over-optimized or overly polished AI-looking code.
+    - Keep the style practical and human, not excessively clever.
+
+    Extracted text:
+    """
+    prompt += extracted_text
 
     response = client.generate(
         model="deepseek-coder-v2",
@@ -205,9 +377,9 @@ def get_general_problem_response(image: Image) -> GeneralProblemResponse:
 
     # Extract text from the image using OCR (since deepseek-reasoner may not support images)
     extracted_text = extract_text_from_image(image)
-    print("\n======================================")
-    print(f"Extracted Text for Online Mode: {extracted_text}")
-    print("======================================\n")
+    debug_print("\n======================================")
+    debug_print(f"Extracted Text for Online Mode: {extracted_text}")
+    debug_print("======================================\n")
 
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -234,12 +406,40 @@ def get_general_problem_response(image: Image) -> GeneralProblemResponse:
         "programming_language": null | "Python",
         "explanation": "Detailed explanation of the solution or reasoning",
         "is_single_answer": false,
-        "is_multiple_answer": false
+        "is_multiple_answer": false,
+        "programming_versions": [
+            {{
+                "version_label": "Version 1 - Initial attempt",
+                "change_summary": "Basic idea with a realistic mistake.",
+                "code": "def solution():\\n    pass",
+                "known_issue": "Short description of the main issue.",
+                "is_correct": false
+            }},
+            {{
+                "version_label": "Version 2 - Improved attempt",
+                "change_summary": "Builds directly on version 1.",
+                "code": "def solution():\\n    pass",
+                "known_issue": "Still has a remaining issue.",
+                "is_correct": false
+            }},
+            {{
+                "version_label": "Version 3 - Almost correct",
+                "change_summary": "Builds directly on version 2 and is close to correct.",
+                "code": "def solution():\\n    pass",
+                "known_issue": "Minor remaining issue before the final answer.",
+                "is_correct": false
+            }}
+        ]
     }}
 
     Instructions:
     - For multiple-choice questions, provide a list of integers for the answer(s) and keep the explanation concise (1-2 sentences, similar to local mode).
-    - For programming questions, deduce the target programming language and write the code that solve the problem.
+    - For programming questions, deduce the target programming language and write the final correct code in "solution".
+    - For programming questions, include 3 or 4 items in "programming_versions".
+    - Each programming version must be clearly based on the previous one.
+    - The early programming versions must have minor realistic bugs, missing cases, or small requirement mistakes.
+    - Keep the programming code reasonably simple and human-like, not overly optimized.
+    - For non-programming problems, omit "programming_versions".
     - For math/logic questions, provide the solution as a string and include a detailed explanation.
     - Ensure the JSON structure matches the specified format exactly.
 
@@ -256,31 +456,31 @@ def get_general_problem_response(image: Image) -> GeneralProblemResponse:
     # Add response_format only if USE_JSON_RESPONSE_FORMAT is True
     if USE_JSON_RESPONSE_FORMAT:
         payload["response_format"] = {"type": "json_object"}
-        print("Using response_format={'type': 'json_object'} in API request")
+        debug_print("Using response_format={'type': 'json_object'} in API request")
     else:
-        print("Skipping response_format in API request")
+        debug_print("Skipping response_format in API request")
 
     # Debug: Log request details (mask API key for security)
-    print(f"Sending request to {DEEPSEEK_API_URL}")
-    print(f"API key present: {'Yes' if DEEPSEEK_API_KEY else 'No'}")
-    print(f"Model: {DEEPSEEK_MODEL}")
+    debug_print(f"Sending request to {DEEPSEEK_API_URL}")
+    debug_print(f"API key present: {'Yes' if DEEPSEEK_API_KEY else 'No'}")
+    debug_print(f"Model: {DEEPSEEK_MODEL}")
 
     try:
         response = requests.post(DEEPSEEK_API_URL, headers=headers, json=payload)
         response.raise_for_status()
 
         # Debug: Print raw response body before parsing
-        print(f"Raw response body: {response.text}")
+        debug_print(f"Raw response body: {response.text}")
 
         try:
             json_response = response.json()
         except json.JSONDecodeError as e:
-            print(f"Failed to parse response as JSON: {e}")
-            print(f"Raw response body: {response.text}")
+            debug_print(f"Failed to parse response as JSON: {e}")
+            debug_print(f"Raw response body: {response.text}")
             raise
 
         # Debug: Print parsed JSON response
-        print(f"Parsed JSON response: {json_response}")
+        debug_print(f"Parsed JSON response: {json_response}")
 
         # Check for expected structure
         if "choices" not in json_response or not json_response["choices"]:
@@ -300,16 +500,16 @@ def get_general_problem_response(image: Image) -> GeneralProblemResponse:
                 try:
                     content = json.loads(content)
                 except json.JSONDecodeError as e:
-                    print(f"Failed to parse content as JSON: {e}")
-                    print(f"Content: {content}")
+                    debug_print(f"Failed to parse content as JSON: {e}")
+                    debug_print(f"Content: {content}")
                     raise
         else:
             # If response_format is not used, content should already be a JSON string
             try:
                 content = json.loads(content)
             except json.JSONDecodeError as e:
-                print(f"Failed to parse content as JSON: {e}")
-                print(f"Content: {content}")
+                debug_print(f"Failed to parse content as JSON: {e}")
+                debug_print(f"Content: {content}")
                 raise
 
         return GeneralProblemResponse.model_validate(content)
@@ -320,13 +520,13 @@ def get_general_problem_response(image: Image) -> GeneralProblemResponse:
             raise ValueError(
                 f"Model '{DEEPSEEK_MODEL}' does not exist. Use 'deepseek-reasoner' (DeepSeek-R1) or 'deepseek-chat' (DeepSeek-V3)."
             ) from e
-        print(f"HTTP Error: {e}")
-        print(f"Response body: {response.text}")
+        debug_print(f"HTTP Error: {e}")
+        debug_print(f"Response body: {response.text}")
         raise
     except Exception as e:
-        print(f"Error processing response: {e}")
+        debug_print(f"Error processing response: {e}")
         if "response" in locals():
-            print(f"Raw response body: {response.text}")
+            debug_print(f"Raw response body: {response.text}")
         raise
 
 
@@ -337,6 +537,8 @@ def extract_text_from_image(image: Image) -> str:
 
 def save_debug_image(image: Image):
     """Save the captured image for debugging."""
+    if not DEBUG_LOGS:
+        return
     image_path = "screenshot.png"
     image.save(image_path)
     print(f"Image saved as: {image_path}")
@@ -349,7 +551,7 @@ def notify(message: str, title: str = "Gorilla Test 🦍"):
 
 def on_press(key):
     """Handle keypress to process questions."""
-    if key == pynput.keyboard.Key.alt_l:
+    if is_trigger_key(key):
         notify("Processing question... 🤔")
         try:
             image = ImageGrab.grab()
@@ -358,9 +560,9 @@ def on_press(key):
             if PLAY_LOCAL:
                 # Local mode: Use OCR and keyword-based logic
                 extracted_text = extract_text_from_image(image)
-                print("\n======================================")
-                print(f"Extracted Text: {extracted_text}")
-                print("======================================\n")
+                debug_print("\n======================================")
+                debug_print(f"Extracted Text: {extracted_text}")
+                debug_print("======================================\n")
 
                 if (
                     "choice" in extracted_text.lower()
@@ -379,9 +581,13 @@ def on_press(key):
                     "function" in extracted_text.lower()
                     or "code" in extracted_text.lower()
                 ):
-                    print("----------------> Processing CODE QUESTION")
                     response = get_programming_problem_response(image, extracted_text)
-                    print(response)
+                    print_programming_response(
+                        response.programming_language,
+                        response.progressive_versions,
+                        response.solution_code,
+                        response.explanation,
+                    )
                     notify(f"Solution: {response.solution_code}")
                 else:
                     notify("Could not determine question type")
@@ -405,21 +611,12 @@ def on_press(key):
                     )
                     notify(f"Answer: {answer}")
                 elif response.problem_type == "programming":
-                    print("----------------> Processing CODE QUESTION")
-                    print(f"problem_type: {response.problem_type}")
-                    print(f"programming_language: {response.programming_language}")
-                    print("solution:")
-                    # Replace escaped newlines with actual newlines for proper formatting
-                    formatted_solution = response.solution.replace("\\n", "\n")
-                    # Print the solution with a slight indent for readability
-                    print(
-                        "\n".join(
-                            "    " + line for line in formatted_solution.splitlines()
-                        )
+                    print_programming_response(
+                        response.programming_language,
+                        response.programming_versions,
+                        response.solution,
+                        response.explanation,
                     )
-                    print(f"explanation: {response.explanation}")
-                    print(f"is_single_answer: {response.is_single_answer}")
-                    print(f"is_multiple_answer: {response.is_multiple_answer}")
                     notify(
                         f"Solution ({response.programming_language}):\n{response.solution}"
                     )
@@ -429,14 +626,7 @@ def on_press(key):
                     )
                     print(f"problem_type: {response.problem_type}")
                     print("solution:")
-                    # Replace escaped newlines with actual newlines for math/logic solutions
-                    formatted_solution = response.solution.replace("\\n", "\n")
-                    # Print the solution with a slight indent for readability
-                    print(
-                        "\n".join(
-                            "    " + line for line in formatted_solution.splitlines()
-                        )
-                    )
+                    print(indent_block(response.solution))
                     print(f"explanation: {response.explanation}")
                     print(f"is_single_answer: {response.is_single_answer}")
                     print(f"is_multiple_answer: {response.is_multiple_answer}")
