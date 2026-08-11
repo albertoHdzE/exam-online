@@ -162,3 +162,17 @@ cython_debug/
 #.idea/
 
 ignore/
+
+# FullTest runtime artifacts
+screenshots/
+data/
+temp_runs/exam_run_*/
+screenshot.png
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Local debug tooling
+.dbg/

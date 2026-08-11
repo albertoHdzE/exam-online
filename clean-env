@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# clean-env — reset the FullTest app to a pristine state for a new exam/test.
+#
+# Removes runtime artifacts only:
+#   - data/exam_online.db (+ -shm/-wal)   question/answer database
+#   - data/provenance.jsonl               append-only event log
+#   - screenshots/*.png                   captured screenshots
+#   - temp_runs/exam_run_*/               sandboxed solution runs
+#   - __pycache__ / .pytest_cache         Python/pytest caches
+#
+# Keeps: source code, venv/, .env, .git/, .dbg/, helper scripts in temp_runs/.
+#
+# Usage:
+#   ./clean-env           ask for confirmation, then clean
+#   ./clean-env -y        clean without asking
+
+set -euo pipefail
+cd "$(dirname "$0")"
+
+ASSUME_YES=0
+if [[ "${1:-}" == "-y" || "${1:-}" == "--yes" ]]; then
+    ASSUME_YES=1
+fi
+
+shopt -s nullglob
+
+TARGETS=(
+    data/exam_online.db
+    data/exam_online.db-shm
+    data/exam_online.db-wal
+    data/provenance.jsonl
+    __pycache__
+    .pytest_cache
+)
+SCREENSHOTS=(screenshots/*.png)
+RUN_DIRS=(temp_runs/exam_run_*/)
+
+echo "The following will be permanently deleted:"
+found=0
+for item in "${TARGETS[@]}"; do
+    if [[ -e "$item" ]]; then
+        echo "  $item"
+        found=1
+    fi
+done
+if ((${#SCREENSHOTS[@]})); then
+    echo "  screenshots/*.png (${#SCREENSHOTS[@]} file(s))"
+    found=1
+fi
+if ((${#RUN_DIRS[@]})); then
+    echo "  temp_runs/exam_run_*/ (${#RUN_DIRS[@]} dir(s))"
+    found=1
+fi
+
+if (( ! found )); then
+    echo "  (nothing to clean — environment is already pristine)"
+    exit 0
+fi
+
+if (( ! ASSUME_YES )); then
+    read -r -p "Proceed? [y/N] " answer
+    if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+        echo "Aborted."
+        exit 1
+    fi
+fi
+
+for item in "${TARGETS[@]}"; do
+    [[ -e "$item" ]] && rm -rf "$item"
+done
+((${#SCREENSHOTS[@]})) && rm -f "${SCREENSHOTS[@]}"
+((${#RUN_DIRS[@]})) && rm -rf "${RUN_DIRS[@]}"
+
+echo "Clean. The database, screenshots, and logs will be recreated on the next run of main.py."
