@@ -82,6 +82,7 @@ USE_JSON_RESPONSE_FORMAT = True
 CODE_TIMEOUT_SECONDS = 30
 MAX_RETRIES_LLM = 2
 MAX_SOLUTION_ATTEMPTS = 4
+EXTRA_SOLUTION_ATTEMPTS = 2
 HOTKEY_DEBOUNCE_SECONDS = 0.35
 
 
@@ -2111,6 +2112,25 @@ class ExamPipeline:
             f"MC answer: {ans.answer} (verification against ground truth required)"
 
     # ------------------------------------------------------------------
+    @staticmethod
+    def _ask_continue_attempts(qid: int, num_failed: int) -> bool:
+        """After the initial attempt budget is exhausted, ask the user
+        (only when a real terminal is attached) whether to keep iterating."""
+        if not sys.stdin.isatty():
+            return False
+        notify_user(
+            f"Q{qid}: {num_failed} attempts failed — answer needed in the terminal to continue.",
+            "FullTest Input Needed")
+        print(f"\n\033[1;33m[PAUSED]\033[0m All {num_failed} attempts failed verification.")
+        try:
+            answer = input(
+                f"Press Enter to continue with {EXTRA_SOLUTION_ATTEMPTS} more attempts, "
+                "or type 'stop' to accept the last candidate: ").strip().lower()
+        except EOFError:
+            return False
+        return answer not in {"stop", "s", "n", "no", "q", "quit"}
+
+    # ------------------------------------------------------------------
     def _stage_programming(self, qid: int,
                            parsed: ParsedQuestion) -> Tuple[QuestionState, str, str]:
         self.db.set_state(qid, QuestionState.ANSWERING)
@@ -2130,10 +2150,17 @@ class ExamPipeline:
         lang = parsed.programming_language or "Python"
         parsed_for_attempt = parsed
 
-        for attempt in range(1, MAX_SOLUTION_ATTEMPTS + 1):
+        max_attempts = MAX_SOLUTION_ATTEMPTS
+        attempt = 0
+        while True:
+            if attempt >= max_attempts:
+                if not self._ask_continue_attempts(qid, len(attempts)):
+                    break
+                max_attempts += EXTRA_SOLUTION_ATTEMPTS
+            attempt += 1
             if attempt > 1:
                 ConsoleFormatter.header(
-                    f"ATTEMPT {attempt}/{MAX_SOLUTION_ATTEMPTS} — "
+                    f"ATTEMPT {attempt}/{max_attempts} — "
                     "RE-GENERATING WITH FAILURE FEEDBACK")
             try:
                 solution = self.llm.generate_solution(
@@ -2184,7 +2211,7 @@ class ExamPipeline:
             self.db.add_code_version(qid, candidate)
             ConsoleFormatter.print_code_version(
                 candidate, language=lang,
-                header_title=f"SOLUTION (ATTEMPT {attempt}/{MAX_SOLUTION_ATTEMPTS})")
+                header_title=f"SOLUTION (ATTEMPT {attempt}/{max_attempts})")
             self._deliver_answer(candidate.code,
                                  f"Solution code (attempt {attempt})")
             attempts.append(candidate)
@@ -2251,6 +2278,14 @@ class ExamPipeline:
             "  OCR-corrupted. Keep the spec-conformant solution_code (improve it if needed) and return a",
             "  corrected suggested_test_code whose expectations match the description and your simulation.",
             "- NEVER make a failing test pass by weakening its expectation to match the code.",
+            "- Compare ALL previous attempts: build on the one that was structurally closest to the",
+            "  description; do NOT remove behavior that earlier attempts already had correct.",
+            "- Never regress to a simpler-but-wrong approach: every requirement an earlier attempt",
+            "  satisfied (edge cases, duplicates vs uniqueness, ordering, limits) must stay satisfied",
+            "  in the new attempt while you fix what the failing tests exposed.",
+            "- Choose the data structure and algorithm from the problem's stated semantics and",
+            "  constraints (duplicates, ordering, lookup patterns, complexity limits) — not from",
+            "  what is simplest to write.",
             "- Sanity check: an example's expected-output list MUST contain exactly one element per query.",
             "  If the visible list has a different length, it is OCR-corrupted — reconstruct it by simulation.",
         ]

@@ -124,4 +124,54 @@ state, correctness, note = p._stage_programming(qid, PARSED)
 assert state == QuestionState.VERIFIED and len(p.llm.prompts) == 1
 print("[ok] scenario C: immediate pass stops after one attempt")
 
+# --- Scenario D: budget exhausted, user continues -> converges on attempt 5 --
+import builtins  # noqa: E402
+import main as main_mod  # noqa: E402
+
+
+class _FakeTty:
+    def isatty(self):
+        return True
+
+
+_orig_stdin, _orig_input, _orig_notify = (
+    main_mod.sys.stdin, builtins.input, main_mod.notify_user)
+main_mod.sys.stdin = _FakeTty()
+builtins.input = lambda prompt="": ""  # user presses Enter -> keep iterating
+main_mod.notify_user = lambda *a, **k: None
+try:
+    scripted = [sol(WRONG_CODE, CORRECT_TESTS)] * MAX_SOLUTION_ATTEMPTS + \
+               [sol(CORRECT_CODE, CORRECT_TESTS)]
+    p = make_pipeline(scripted)
+    qid = p.db.create_question(p.session_id, "[]")
+    state, correctness, note = p._stage_programming(qid, PARSED)
+    assert state == QuestionState.VERIFIED, state
+    assert len(p.llm.prompts) == MAX_SOLUTION_ATTEMPTS + 1, \
+        "loop must extend past the initial budget when the user continues"
+    assert f"{MAX_SOLUTION_ATTEMPTS} PREVIOUS ATTEMPT(S)" in p.llm.prompts[-1], \
+        "extended attempt must see the full failure history"
+finally:
+    main_mod.sys.stdin, builtins.input, main_mod.notify_user = (
+        _orig_stdin, _orig_input, _orig_notify)
+print(f"[ok] scenario D: after {MAX_SOLUTION_ATTEMPTS} failures, Enter extends "
+      "the budget and the loop converges on attempt 5")
+
+# --- Scenario E: budget exhausted, user stops -> FAILED at budget ------------
+_orig_stdin, _orig_input, _orig_notify = (
+    main_mod.sys.stdin, builtins.input, main_mod.notify_user)
+main_mod.sys.stdin = _FakeTty()
+builtins.input = lambda prompt="": "stop"
+main_mod.notify_user = lambda *a, **k: None
+try:
+    p = make_pipeline([sol(WRONG_CODE, CORRECT_TESTS)] * (MAX_SOLUTION_ATTEMPTS + 2))
+    qid = p.db.create_question(p.session_id, "[]")
+    state, correctness, note = p._stage_programming(qid, PARSED)
+    assert state == QuestionState.FAILED, state
+    assert len(p.llm.prompts) == MAX_SOLUTION_ATTEMPTS, \
+        "'stop' must end the loop at the initial budget"
+finally:
+    main_mod.sys.stdin, builtins.input, main_mod.notify_user = (
+        _orig_stdin, _orig_input, _orig_notify)
+print(f"[ok] scenario E: 'stop' ends the loop after {MAX_SOLUTION_ATTEMPTS} attempts")
+
 print("ITERATIVE_LOOP_TEST_PASSED")
