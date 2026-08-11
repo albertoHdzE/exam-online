@@ -18,6 +18,7 @@ import subprocess
 import textwrap
 import hashlib
 import urllib.request
+import platform
 from concurrent.futures import ThreadPoolExecutor
 from importlib import metadata as importlib_metadata
 from datetime import datetime, timezone
@@ -457,6 +458,73 @@ def copy_to_clipboard(text: str) -> bool:
     except Exception as e:
         ProvenanceLedger.record("clipboard_copy_error", {"error": str(e)})
         return False
+
+
+# -------------------------------------------------------------------------
+# Notifications: adaptive backend selection per machine.
+# pync's vendored terminal-notifier is an x86_64-only binary: it runs
+# natively on Intel Macs and on Apple Silicon only when Rosetta 2 is
+# installed. Everywhere else we fall back to AppleScript (osascript),
+# which is native on every macOS.
+# -------------------------------------------------------------------------
+_NOTIFICATION_BACKEND: Optional[str] = None
+
+
+def _detect_notification_backend() -> str:
+    if sys.platform != "darwin":
+        return "osascript"
+    machine = platform.machine()
+    if machine == "x86_64":
+        return "pync"  # Intel Mac: vendored binary runs natively
+    if machine == "arm64":
+        try:
+            probe = subprocess.run(
+                ["/usr/bin/arch", "-x86_64", "/usr/bin/true"],
+                capture_output=True, timeout=5)
+            if probe.returncode == 0:
+                return "pync"  # Apple Silicon with Rosetta 2 installed
+        except Exception:
+            pass
+    return "osascript"
+
+
+def init_notifications() -> str:
+    """Select and remember the notification backend for this machine."""
+    global _NOTIFICATION_BACKEND
+    if _NOTIFICATION_BACKEND is None:
+        _NOTIFICATION_BACKEND = _detect_notification_backend()
+        ProvenanceLedger.record("notification_backend", {
+            "backend": _NOTIFICATION_BACKEND,
+            "machine": platform.machine(),
+        })
+    return _NOTIFICATION_BACKEND
+
+
+def _osascript_notify(message: str, title: str) -> None:
+    def esc(text: str) -> str:
+        return text.replace("\\", "\\\\").replace('"', '\\"')
+
+    script = f'display notification "{esc(message)}" with title "{esc(title)}"'
+    try:
+        subprocess.run(["osascript", "-e", script],
+                       capture_output=True, timeout=5, check=False)
+    except Exception as e:
+        ProvenanceLedger.record("notification_error", {"error": str(e)})
+
+
+def notify_user(message: str, title: str) -> None:
+    global _NOTIFICATION_BACKEND
+    backend = init_notifications()
+    if backend == "pync":
+        try:
+            pync.notify(message, title=title)
+            return
+        except Exception as e:
+            # e.g. Rosetta removed mid-session or a broken vendored binary
+            ProvenanceLedger.record("notification_fallback", {
+                "from": "pync", "to": "osascript", "error": str(e)})
+            _NOTIFICATION_BACKEND = "osascript"
+    _osascript_notify(message, title)
 
 
 # =========================================================================
@@ -1778,7 +1846,7 @@ class ExamPipeline:
             img = self.shots.capture(extract_text=False)
             self.session_images.append(img)
             self._ocr_queue.put(img)
-            pync.notify(
+            notify_user(
                 f"Captured #{len(self.session_images)} ({img.file_path.name})",
                 title="FullTest Capture",
             )
@@ -1799,7 +1867,7 @@ class ExamPipeline:
         )
         # #endregion
         if not self.session_images:
-            pync.notify("No screenshots captured yet.", title="FullTest Warning")
+            notify_user("No screenshots captured yet.", title="FullTest Warning")
             print(f"\n\033[1;33m[WARN]\033[0m Press {CAPTURE_LABEL} first to capture at least one screenshot.")
             return
         try:
@@ -1819,7 +1887,7 @@ class ExamPipeline:
                     "and that your terminal has Screen Recording permission "
                     "(System Settings -> Privacy & Security -> Screen Recording)."
                 )
-                pync.notify(warning, title="FullTest Warning")
+                notify_user(warning, title="FullTest Warning")
                 print(f"\n\033[1;33m[WARN]\033[0m {warning}")
                 ProvenanceLedger.record("process_aborted_empty_ocr", {
                     "files": [str(i.file_path) for i in unique_images],
@@ -1837,13 +1905,13 @@ class ExamPipeline:
                 },
             )
             # #endregion
-            pync.notify(
+            notify_user(
                 f"Processing {len(self.session_images)} shot(s) ({num_unique} unique)...",
                 title="FullTest AI Processing",
             )
             qid = self._run_pipeline()
             self.session_images = []
-            pync.notify(f"Question #{qid} complete.",
+            notify_user(f"Question #{qid} complete.",
                         title="FullTest Complete")
             ConsoleFormatter.print_session_status(
                 0, f"session={self.session_id[:12]} | last Q=#{qid}")
@@ -2005,7 +2073,7 @@ class ExamPipeline:
         if copy_to_clipboard(text):
             print(f"\n\033[1;32m[CLIPBOARD]\033[0m {label} copied to clipboard — "
                   "paste it with Cmd+V (do NOT retype it; typos fail the tests).")
-            pync.notify(f"{label} copied to clipboard — paste with Cmd+V",
+            notify_user(f"{label} copied to clipboard — paste with Cmd+V",
                         title="FullTest Answer Ready")
 
     # ------------------------------------------------------------------
@@ -2287,11 +2355,20 @@ def main() -> None:
         ensure_macos_input_monitoring_trust()
 
         if sys.platform == "darwin":
+            notification_backend = init_notifications()
+            backend_note = (
+                "pync/terminal-notifier (Intel binary via Rosetta 2)"
+                if notification_backend == "pync" else
+                "osascript (native AppleScript)")
             print(
                 "\n[INFO] macOS global hotkey monitor active (Quartz event tap with "
                 f"auto-recovery). {CAPTURE_LABEL}=Capture  {PROCESS_LABEL}=Process  "
                 f"{QUIT_LABEL}=Quit — detected from any app and any desktop/Space, "
                 "and suppressed so other apps never receive them."
+            )
+            print(
+                f"[INFO] Machine: {platform.machine()} | "
+                f"Notifications: {backend_note}"
             )
         else:
             print(

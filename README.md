@@ -68,6 +68,8 @@ For context on why this project was created, check out the blog post: [Pass any 
 
 4. The final answer is placed on your clipboard automatically — paste it into the exam with Cmd+V instead of retyping it.
 
+   Notifications adapt to the machine automatically: on Intel Macs and Apple Silicon with Rosetta 2 they use pync/terminal-notifier; on Apple Silicon without Rosetta (where pync's Intel-only binary cannot run) the app falls back to native AppleScript notifications. The selected backend is printed at startup and requires no configuration.
+
 5. If the platform rejects an answer, capture the feedback screen with `F6` and press `F7` again: visible feedback (failed tests, grader messages) is parsed as task context for the next attempt.
 
 ## Maintenance
