@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pynput
 from PIL import Image, ImageGrab, ImageOps, ImageFilter
@@ -62,11 +62,17 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 # Global hotkeys are function keys so they never collide with typing answers
 # in the exam interface (plain letters were suppressed system-wide before).
-# macOS virtual keycodes: F6=97, F7=98, F8=100.
-HOTKEY_ACTION_KEYCODES = {97: "capture", 98: "process", 100: "quit"}
+# macOS virtual keycodes: F6=97, F7=98, F8=100, F9=101.
+HOTKEY_ACTION_KEYCODES = {
+    97: "capture",
+    98: "process",
+    100: "quit",
+    101: "directive",
+}
 CAPTURE_LABEL = "F6"
 PROCESS_LABEL = "F7"
 QUIT_LABEL = "F8"
+DIRECTIVE_LABEL = "F9"
 
 # Single-key controls used only in terminal control mode (no global monitor).
 KEY_CAPTURE = "c"
@@ -601,8 +607,20 @@ class Database:
                 FOREIGN KEY (question_id) REFERENCES questions(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS user_directives (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                directive_text TEXT NOT NULL,
+                status TEXT NOT NULL,
+                consumed_by_question_id INTEGER,
+                FOREIGN KEY (consumed_by_question_id) REFERENCES questions(id) ON DELETE SET NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id);
             CREATE INDEX IF NOT EXISTS idx_questions_state ON questions(state);
+            CREATE INDEX IF NOT EXISTS idx_user_directives_session
+                ON user_directives(session_id, status, created_at);
             """)
 
     def create_question(self, session_id: str, screenshots_json: str) -> int:
@@ -694,6 +712,79 @@ class Database:
             ).fetchall()
             return list(rows)
 
+    def get_generated_artifacts(self, question_id: int,
+                                artifact_type: Optional[str] = None) -> List[sqlite3.Row]:
+        with self._connect() as conn:
+            if artifact_type:
+                rows = conn.execute(
+                    """SELECT * FROM generated_artifacts
+                    WHERE question_id = ? AND artifact_type = ?
+                    ORDER BY id""",
+                    (question_id, artifact_type),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT * FROM generated_artifacts
+                    WHERE question_id = ?
+                    ORDER BY id""",
+                    (question_id,),
+                ).fetchall()
+            return list(rows)
+
+    def get_latest_verified_question(self, session_id: str,
+                                     before_question_id: Optional[int] = None) -> Optional[sqlite3.Row]:
+        query = [
+            "SELECT * FROM questions",
+            "WHERE session_id = ?",
+            "AND correctness = 'VERIFIED'",
+        ]
+        params: List[Any] = [session_id]
+        if before_question_id is not None:
+            query.append("AND id < ?")
+            params.append(before_question_id)
+        query.append("ORDER BY id DESC LIMIT 1")
+        with self._connect() as conn:
+            return conn.execute(" ".join(query), params).fetchone()
+
+    def add_user_directive(self, session_id: str, directive_text: str,
+                           status: str = "pending") -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """INSERT INTO user_directives
+                (session_id, created_at, directive_text, status)
+                VALUES (?, ?, ?, ?)""",
+                (
+                    session_id,
+                    datetime.now(timezone.utc).isoformat(),
+                    directive_text,
+                    status,
+                ),
+            )
+            return cur.lastrowid
+
+    def get_pending_user_directives(self, session_id: str) -> List[sqlite3.Row]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM user_directives
+                WHERE session_id = ? AND status = 'pending'
+                ORDER BY id""",
+                (session_id,),
+            ).fetchall()
+            return list(rows)
+
+    def mark_user_directives_consumed(self, directive_ids: List[int],
+                                      question_id: int) -> None:
+        if not directive_ids:
+            return
+        placeholders = ", ".join("?" for _ in directive_ids)
+        with self._connect() as conn:
+            conn.execute(
+                f"""UPDATE user_directives
+                SET status = 'consumed', consumed_by_question_id = ?
+                WHERE id IN ({placeholders})""",
+                [question_id] + directive_ids,
+            )
+
 
 # =========================================================================
 # Section 4: Pydantic Response Models
@@ -723,6 +814,13 @@ class ParsedQuestion(pydantic.BaseModel):
     required_runtime_artifacts: Optional[List[str]] = None
     artifact_generation_strategy: Optional[str] = None
     conservative_assumptions: Optional[List[str]] = None
+    interface_style: Optional[str] = None
+    primary_solution_file: Optional[str] = None
+    visible_project_files: Optional[List[str]] = None
+    editable_project_files: Optional[List[str]] = None
+    visible_test_files: Optional[List[str]] = None
+    visible_file_contents: Optional[Dict[str, str]] = None
+    project_context_notes: Optional[List[str]] = None
 
 
 class MultipleChoiceAnswer(pydantic.BaseModel):
@@ -739,6 +837,14 @@ class SingleSolutionCode(pydantic.BaseModel):
     programming_language: str
     suggested_test_code: Optional[str] = None
     architecture_notes: Optional[str] = None
+    primary_solution_file: Optional[str] = None
+    project_files: Optional[List["ProjectFileSpec"]] = None
+
+
+class ProjectFileSpec(pydantic.BaseModel):
+    file_name: str
+    content: str
+    purpose: str
 
 
 class ArtifactFileSpec(pydantic.BaseModel):
@@ -753,18 +859,39 @@ class GeneratedArtifacts(pydantic.BaseModel):
     notes: Optional[str] = None
 
 
+@dataclass
+class ProgrammingSessionContext:
+    primary_solution_file: str
+    interface_style: str = "single-file"
+    visible_project_files: List[str] = field(default_factory=list)
+    editable_project_files: List[str] = field(default_factory=list)
+    visible_test_files: List[str] = field(default_factory=list)
+    visible_file_contents: Dict[str, str] = field(default_factory=dict)
+    previous_verified_question_id: Optional[int] = None
+    previous_primary_solution_file: Optional[str] = None
+    previous_verified_code: Optional[str] = None
+    previous_verified_test_code: Optional[str] = None
+    previous_generated_files: Dict[str, str] = field(default_factory=dict)
+    pending_directives: List[str] = field(default_factory=list)
+
+
+SingleSolutionCode.model_rebuild()
+
+
 class AdaptiveArtifactBuilder:
     def __init__(self, llm: "LLMClient", db: Database):
         self.llm = llm
         self.db = db
 
     @staticmethod
-    def build_test_module_from_extracted(parsed: ParsedQuestion) -> str:
+    def build_test_module_from_extracted(parsed: ParsedQuestion,
+                                         primary_solution_file: str = "solution.py") -> str:
+        module_name = Path(primary_solution_file).with_suffix("").name or "solution"
         lines = [
             "import sys",
             "import os",
             "sys.path.insert(0, os.path.dirname(__file__))",
-            "from solution import *",
+            f"from {module_name} import *",
             "",
             "# Auto-generated from tests/examples embedded in question",
         ]
@@ -779,9 +906,16 @@ class AdaptiveArtifactBuilder:
         return "\n".join(lines)
 
     def build(self, question_id: int, parsed: ParsedQuestion,
-              images: List[CapturedImage], solution_code: str) -> Tuple[Optional[str], Dict[str, str], str]:
+              images: List[CapturedImage], solution_code: str,
+              session_context: Optional[ProgrammingSessionContext] = None) -> Tuple[Optional[str], Dict[str, str], str]:
+        primary_solution_file = (
+            session_context.primary_solution_file
+            if session_context else
+            (parsed.primary_solution_file or "solution.py")
+        )
         if parsed.extracted_tests:
-            test_code = self.build_test_module_from_extracted(parsed)
+            test_code = self.build_test_module_from_extracted(
+                parsed, primary_solution_file=primary_solution_file)
             self.db.add_generated_artifact(
                 question_id, "test_solution.py", "pytest-module",
                 "extracted-tests", test_code
@@ -797,7 +931,12 @@ class AdaptiveArtifactBuilder:
         )
 
         if should_generate_adaptive_artifacts:
-            generated = self.llm.generate_adaptive_artifacts(parsed, images, solution_code)
+            generated = self.llm.generate_adaptive_artifacts(
+                parsed,
+                images,
+                solution_code,
+                session_context=session_context,
+            )
             auxiliary_files: Dict[str, str] = {}
             if generated.suggested_test_code:
                 self.db.add_generated_artifact(
@@ -814,7 +953,12 @@ class AdaptiveArtifactBuilder:
                 generated.notes or "Generated adaptive runtime artifacts"
             )
 
-        test_code = self.llm.generate_supplementary_tests(parsed, images, solution_code)
+        test_code = self.llm.generate_supplementary_tests(
+            parsed,
+            images,
+            solution_code,
+            session_context=session_context,
+        )
         self.db.add_generated_artifact(
             question_id, "test_solution.py", "pytest-module",
             "supplementary-llm", test_code
@@ -1020,6 +1164,8 @@ class LLMClient:
             f"Progressive assessment: {parsed.likely_progressive_assessment}",
             f"Requires stateful solution: {parsed.requires_stateful_solution}",
             f"Standard library only: {parsed.standard_library_only}",
+            f"Interface style: {parsed.interface_style or 'unspecified'}",
+            f"Primary solution file: {parsed.primary_solution_file or 'solution.py'}",
         ]
         if parsed.progressive_requirements:
             context_lines.append(
@@ -1034,7 +1180,84 @@ class LLMClient:
             context_lines.append(
                 "Likely domain entities: " + ", ".join(parsed.likely_domain_entities)
             )
+        if parsed.visible_project_files:
+            context_lines.append(
+                "Visible project files: " + ", ".join(parsed.visible_project_files)
+            )
+        if parsed.editable_project_files:
+            context_lines.append(
+                "Editable project files: " + ", ".join(parsed.editable_project_files)
+            )
+        if parsed.visible_test_files:
+            context_lines.append(
+                "Visible test files: " + ", ".join(parsed.visible_test_files)
+            )
+        if parsed.project_context_notes:
+            context_lines.append(
+                "Project context notes: " + "; ".join(parsed.project_context_notes)
+            )
         return "\n".join(context_lines)
+
+    @staticmethod
+    def _session_context_block(
+        session_context: Optional[ProgrammingSessionContext],
+    ) -> str:
+        if session_context is None:
+            return "No prior session context available."
+
+        lines = [
+            f"Session interface style: {session_context.interface_style}",
+            f"Primary solution file for this attempt: {session_context.primary_solution_file}",
+        ]
+        if session_context.visible_project_files:
+            lines.append(
+                "Current visible project files: "
+                + ", ".join(session_context.visible_project_files)
+            )
+        if session_context.editable_project_files:
+            lines.append(
+                "Current editable files: "
+                + ", ".join(session_context.editable_project_files)
+            )
+        if session_context.visible_test_files:
+            lines.append(
+                "Current visible test files: "
+                + ", ".join(session_context.visible_test_files)
+            )
+        if session_context.pending_directives:
+            lines.append("Pending user directives:")
+            for directive in session_context.pending_directives:
+                lines.append(f"- {directive}")
+        if session_context.previous_verified_question_id is not None:
+            lines.append(
+                f"Previous verified question id: {session_context.previous_verified_question_id}"
+            )
+        if session_context.previous_primary_solution_file:
+            lines.append(
+                "Previous verified primary file: "
+                + session_context.previous_primary_solution_file
+            )
+        if session_context.previous_verified_code:
+            lines.append(
+                "Previous verified primary file contents:\n"
+                + session_context.previous_verified_code[:6000]
+            )
+        if session_context.previous_verified_test_code:
+            lines.append(
+                "Previous verified test module:\n"
+                + session_context.previous_verified_test_code[:4000]
+            )
+        if session_context.previous_generated_files:
+            lines.append("Previous generated support files:")
+            for file_name, content in list(session_context.previous_generated_files.items())[:8]:
+                lines.append(f"[FILE] {file_name}")
+                lines.append(content[:3000])
+        if session_context.visible_file_contents:
+            lines.append("Currently visible file contents from OCR:")
+            for file_name, content in list(session_context.visible_file_contents.items())[:8]:
+                lines.append(f"[VISIBLE FILE] {file_name}")
+                lines.append(content[:3000])
+        return "\n".join(lines)
 
     @staticmethod
     def image_to_base64(path: Path) -> str:
@@ -1170,6 +1393,14 @@ Critical rules:
    - required_runtime_artifacts: artifacts needed to test or simulate the visible contract, e.g. helper fixtures, fake API module, operation-sequence tests, temporary state records
    - artifact_generation_strategy: one short sentence describing what should be generated on the fly
    - conservative_assumptions: safe fallback assumptions if clarifications remain unanswered
+7a. If the screenshots show an IDE or project tree, extract project-aware fields too:
+   - interface_style: use values like single-function, single-file, multi-file-project, repl, or unknown
+   - primary_solution_file: the main editable implementation file if visible
+   - visible_project_files: all clearly visible file paths or file names in the tree/editor tabs
+   - editable_project_files: files the user is expected to edit or implement
+   - visible_test_files: visible unit-test or harness files
+   - visible_file_contents: a map of file_name -> visible code/text only when the content is legible enough to be useful
+   - project_context_notes: short bullets about how the visible project is organized
 8. Return ONLY valid JSON, no markdown fences, no commentary.
 
 Images: the user provided {len([i for i in images if not i.is_duplicate])} unique screenshots.
@@ -1257,9 +1488,11 @@ Options:
         raise RuntimeError(f"Failed to solve multiple-choice: {raw}")
 
     def generate_solution(self, parsed: ParsedQuestion,
-                          images: List[CapturedImage]) -> SingleSolutionCode:
+                          images: List[CapturedImage],
+                          session_context: Optional[ProgrammingSessionContext] = None) -> SingleSolutionCode:
         merged_ocr = self._merge_ocr_texts(images)
         architecture_context = self._programming_context_block(parsed)
+        session_context_block = self._session_context_block(session_context)
         extracted_tests_block = ""
         if parsed.extracted_tests:
             extracted_tests_block = (
@@ -1278,6 +1511,9 @@ REQUIRED OUTPUT FORMAT (if any): {parsed.required_output_format or "(standard)"}
 ASSESSMENT CONTEXT:
 {architecture_context}
 
+SESSION CONTINUITY:
+{session_context_block}
+
 {extracted_tests_block}
 
 PROBLEM DESCRIPTION:
@@ -1289,7 +1525,15 @@ Return ONLY valid JSON matching this exact schema with no other text:
   "explanation": "explanation of approach",
   "programming_language": "{lang}",
   "suggested_test_code": "optional string containing a pytest-compatible test module exercising the solution thoroughly",
-  "architecture_notes": "short note about the design choices that keep the solution extensible"
+  "architecture_notes": "short note about the design choices that keep the solution extensible",
+  "primary_solution_file": "file path for solution_code, usually the main editable file",
+  "project_files": [
+    {{
+      "file_name": "relative/path/to/support_file.py",
+      "content": "file contents",
+      "purpose": "why this extra file is needed"
+    }}
+  ]
 }}
 
 Important:
@@ -1301,6 +1545,10 @@ Important:
 - For stateful problems, prefer a small class-based design with clear helper methods and, when natural, dataclasses for records.
 - Prefer dictionaries, lists, and straightforward control flow over clever abstractions.
 - If the domain resembles a banking ledger or in-memory database, design for future operations such as transfers, scans, TTL, audits, scheduling, or rollback even if they are not yet implemented.
+- When prior verified code is provided, extend it carefully instead of redesigning from scratch unless the visible prompt or failure feedback proves it is wrong.
+- Treat pending user directives as guidance about approach, debugging, or emphasis. They do NOT override the problem statement's behavioral contract.
+- If this is a file-based project, solution_code should contain the full contents of primary_solution_file.
+- Only include project_files when extra support files are genuinely needed for the visible contract or for preserving previous verified structure.
 - suggested_test_code should normally be present. It must be pytest-compatible, self-contained, and verify correctness plus a few edge cases using only the visible requirements.
 - Make absolutely sure solution_code is correct and compiles/runs first try.
 """
@@ -1322,9 +1570,11 @@ Important:
 
     def generate_supplementary_tests(self, parsed: ParsedQuestion,
                                      images: List[CapturedImage],
-                                     solution_code: str) -> str:
+                                     solution_code: str,
+                                     session_context: Optional[ProgrammingSessionContext] = None) -> str:
         merged_ocr = self._merge_ocr_texts(images)
         architecture_context = self._programming_context_block(parsed)
+        session_context_block = self._session_context_block(session_context)
         prompt = f"""Generate a pytest-compatible test module for the following programming question and solution.
 Return ONLY valid JSON in the form:
 {{"suggested_test_code": "full pytest module as a string"}}
@@ -1338,6 +1588,9 @@ Requirements:
 
 ASSESSMENT CONTEXT:
 {architecture_context}
+
+SESSION CONTINUITY:
+{session_context_block}
 
 QUESTION:
 {parsed.full_question}
@@ -1368,9 +1621,11 @@ SOLUTION CODE:
 
     def generate_adaptive_artifacts(self, parsed: ParsedQuestion,
                                     images: List[CapturedImage],
-                                    solution_code: str) -> GeneratedArtifacts:
+                                    solution_code: str,
+                                    session_context: Optional[ProgrammingSessionContext] = None) -> GeneratedArtifacts:
         merged_ocr = self._merge_ocr_texts(images)
         architecture_context = self._programming_context_block(parsed)
+        session_context_block = self._session_context_block(session_context)
         prompt = f"""Generate adaptive runtime artifacts for verifying a programming solution.
 Return ONLY valid JSON matching this schema:
 {{
@@ -1395,6 +1650,9 @@ Rules:
 
 ASSESSMENT CONTEXT:
 {architecture_context}
+
+SESSION CONTINUITY:
+{session_context_block}
 
 VISIBLE INTERFACES:
 {json.dumps(parsed.visible_interfaces or [])}
@@ -1439,11 +1697,13 @@ SOLUTION CODE:
 
 class CodeExecutor:
     @staticmethod
-    def _normalize_python_test_code(test_code: str) -> str:
+    def _normalize_python_test_code(test_code: str,
+                                    primary_solution_file: str = "solution.py") -> str:
         stripped = test_code.lstrip()
+        module_name = Path(primary_solution_file).with_suffix("").name or "solution"
         has_solution_import = (
-            "from solution import" in test_code
-            or "import solution" in test_code
+            f"from {module_name} import" in test_code
+            or f"import {module_name}" in test_code
         )
         if has_solution_import:
             return test_code
@@ -1452,16 +1712,18 @@ class CodeExecutor:
             "import os",
             "import sys",
             "sys.path.insert(0, os.path.dirname(__file__))",
-            "from solution import *",
+            f"from {module_name} import *",
             "",
         ])
         return preamble + stripped
 
     @staticmethod
     def _prepare_script(code: str, test_code: Optional[str],
-                        auxiliary_files: Optional[Dict[str, str]] = None) -> Tuple[Path, Path]:
+                        auxiliary_files: Optional[Dict[str, str]] = None,
+                        primary_solution_file: str = "solution.py") -> Tuple[Path, Path]:
         tmpdir = Path(tempfile.mkdtemp(prefix="exam_run_", dir=str(TEMP_DIR)))
-        script = tmpdir / "solution.py"
+        script = tmpdir / primary_solution_file
+        script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text(code, encoding="utf-8")
         for file_name, content in (auxiliary_files or {}).items():
             relative_path = Path(file_name)
@@ -1473,7 +1735,10 @@ class CodeExecutor:
         if test_code:
             test_file = tmpdir / "test_solution.py"
             test_file.write_text(
-                CodeExecutor._normalize_python_test_code(test_code),
+                CodeExecutor._normalize_python_test_code(
+                    test_code,
+                    primary_solution_file=primary_solution_file,
+                ),
                 encoding="utf-8",
             )
             return script, test_file
@@ -1492,8 +1757,14 @@ class CodeExecutor:
     @classmethod
     def run_python(cls, code: str,
                    test_code: Optional[str] = None,
-                   auxiliary_files: Optional[Dict[str, str]] = None) -> Tuple[bool, str]:
-        script_path, test_path = cls._prepare_script(code, test_code, auxiliary_files)
+                   auxiliary_files: Optional[Dict[str, str]] = None,
+                   primary_solution_file: str = "solution.py") -> Tuple[bool, str]:
+        script_path, test_path = cls._prepare_script(
+            code,
+            test_code,
+            auxiliary_files,
+            primary_solution_file=primary_solution_file,
+        )
         tmpdir = script_path.parent
         python_exe = str(VenvManager.get_python_path())
         run_ok = True
@@ -1637,7 +1908,10 @@ class ConsoleFormatter:
         ready = "\033[1;32mREADY\033[0m" if num_images == 0 else \
             f"\033[1;33m{num_images} IMAGE(S)\033[0m"
         bar = f"[{ready}] {mode_desc}  |  " \
-              f"\033[1m{CAPTURE_LABEL}\033[0m=Capture  \033[1m{PROCESS_LABEL}\033[0m=Process  \033[1m{QUIT_LABEL}\033[0m=Quit"
+              f"\033[1m{CAPTURE_LABEL}\033[0m=Capture  " \
+              f"\033[1m{PROCESS_LABEL}\033[0m=Process  " \
+              f"\033[1m{DIRECTIVE_LABEL}\033[0m=Directive  " \
+              f"\033[1m{QUIT_LABEL}\033[0m=Quit"
         print("\r" + bar.ljust(W), end="", flush=True)
 
     @classmethod
@@ -1788,7 +2062,142 @@ class ExamPipeline:
             "required_runtime_artifacts": parsed.required_runtime_artifacts,
             "artifact_generation_strategy": parsed.artifact_generation_strategy,
             "conservative_assumptions": parsed.conservative_assumptions,
+            "interface_style": parsed.interface_style,
+            "primary_solution_file": parsed.primary_solution_file,
+            "visible_project_files": parsed.visible_project_files,
+            "editable_project_files": parsed.editable_project_files,
+            "visible_test_files": parsed.visible_test_files,
+            "visible_file_contents": parsed.visible_file_contents,
+            "project_context_notes": parsed.project_context_notes,
         }
+
+    @staticmethod
+    def _prompt_multiline_input(prompt_title: str) -> str:
+        print(f"\n{prompt_title}")
+        print("Finish with an empty line.\n")
+        lines: List[str] = []
+        while True:
+            try:
+                line = input("> " if not lines else ". ")
+            except EOFError:
+                break
+            if not line.strip():
+                break
+            lines.append(line.rstrip())
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _infer_primary_solution_file(parsed: ParsedQuestion) -> str:
+        for candidate in (parsed.editable_project_files or []):
+            if candidate:
+                return candidate
+        if parsed.primary_solution_file:
+            return parsed.primary_solution_file
+        for candidate in (parsed.visible_project_files or []):
+            lower_name = candidate.lower()
+            if "test" not in lower_name and lower_name.endswith(".py"):
+                return candidate
+        return "solution.py"
+
+    def _attach_pending_directives(self, parsed: ParsedQuestion,
+                                   directive_rows: List[sqlite3.Row]) -> ParsedQuestion:
+        if not directive_rows:
+            return parsed
+        augmented = ParsedQuestion(**parsed.model_dump())
+        block = [
+            "[USER DIRECTIVES]",
+            "Treat the following notes as user guidance about approach, debugging, or emphasis.",
+            "They never override the visible behavioral contract of the problem.",
+        ]
+        for index, row in enumerate(directive_rows, start=1):
+            block.append(f"{index}. {row['directive_text']}")
+        augmented.full_question = augmented.full_question + "\n\n" + "\n".join(block)
+        context_notes = list(augmented.project_context_notes or [])
+        context_notes.append(
+            f"Attached {len(directive_rows)} pending user directive(s) for this attempt"
+        )
+        augmented.project_context_notes = context_notes
+        return augmented
+
+    def _build_programming_session_context(
+        self,
+        qid: int,
+        parsed: ParsedQuestion,
+        directive_rows: List[sqlite3.Row],
+    ) -> ProgrammingSessionContext:
+        primary_solution_file = self._infer_primary_solution_file(parsed)
+        previous_verified = self.db.get_latest_verified_question(
+            self.session_id,
+            before_question_id=qid,
+        )
+        previous_primary_solution_file: Optional[str] = None
+        previous_verified_code: Optional[str] = None
+        previous_verified_test_code: Optional[str] = None
+        previous_generated_files: Dict[str, str] = {}
+
+        if previous_verified is not None:
+            previous_verified_code = previous_verified["proposed_answer"]
+            metadata_json = previous_verified["metadata_json"]
+            if metadata_json:
+                try:
+                    previous_metadata = json.loads(metadata_json)
+                    previous_primary_solution_file = previous_metadata.get(
+                        "primary_solution_file"
+                    )
+                except Exception:
+                    previous_primary_solution_file = None
+            artifacts = self.db.get_generated_artifacts(previous_verified["id"])
+            for artifact in artifacts:
+                artifact_type = artifact["artifact_type"]
+                artifact_name = artifact["artifact_name"]
+                if artifact_type == "pytest-module":
+                    previous_verified_test_code = artifact["content"]
+                elif artifact_type == "solution-support-file":
+                    previous_generated_files[artifact_name] = artifact["content"]
+
+        return ProgrammingSessionContext(
+            primary_solution_file=primary_solution_file,
+            interface_style=parsed.interface_style or "single-file",
+            visible_project_files=list(parsed.visible_project_files or []),
+            editable_project_files=list(parsed.editable_project_files or []),
+            visible_test_files=list(parsed.visible_test_files or []),
+            visible_file_contents=dict(parsed.visible_file_contents or {}),
+            previous_verified_question_id=(
+                int(previous_verified["id"]) if previous_verified is not None else None
+            ),
+            previous_primary_solution_file=previous_primary_solution_file,
+            previous_verified_code=previous_verified_code,
+            previous_verified_test_code=previous_verified_test_code,
+            previous_generated_files=previous_generated_files,
+            pending_directives=[row["directive_text"] for row in directive_rows],
+        )
+
+    def handle_add_directive(self) -> None:
+        if not sys.stdin.isatty():
+            print(
+                f"\n\033[1;33m[WARN]\033[0m {DIRECTIVE_LABEL} requires an interactive terminal."
+            )
+            return
+        directive_text = self._prompt_multiline_input(
+            "Enter extra requirements, feedback, or guidance for the next processing run."
+        )
+        if not directive_text:
+            print("\n\033[2m[INFO] No directive captured.\033[0m")
+            return
+        directive_id = self.db.add_user_directive(self.session_id, directive_text)
+        ProvenanceLedger.record(
+            "user_directive_added",
+            {
+                "session_id": self.session_id,
+                "directive_id": directive_id,
+                "text_preview": directive_text[:300],
+            },
+        )
+        notify_user("Directive saved for the next processing run.",
+                    title="FullTest Directive Saved")
+        print(
+            f"\n\033[1;32m[DIRECTIVE SAVED]\033[0m Stored note #{directive_id} for the next process step."
+        )
 
     def _handle_clarifications(self, qid: int, parsed: ParsedQuestion) -> ParsedQuestion:
         questions = parsed.clarification_questions or []
@@ -2028,6 +2437,10 @@ class ExamPipeline:
                 QuestionState.ERROR_PARSE, "UNCHECKED", str(e))
             return qid
 
+        pending_directives = self.db.get_pending_user_directives(self.session_id)
+        if pending_directives:
+            parsed = self._attach_pending_directives(parsed, pending_directives)
+
         raw_text = "\n".join(i.ocr_text for i in self.session_images)
         self.db.update_question(
             qid,
@@ -2060,10 +2473,15 @@ class ExamPipeline:
         if parsed.problem_type == ProblemType.MULTIPLE_CHOICE:
             final_state, correctness, note = self._stage_mc(qid, parsed)
         elif parsed.problem_type == ProblemType.PROGRAMMING:
-            final_state, correctness, note = self._stage_programming(qid, parsed)
+            final_state, correctness, note = self._stage_programming(
+                qid, parsed, pending_directives)
         else:
             final_state, correctness, note = self._stage_general_text(qid, parsed)
 
+        self.db.mark_user_directives_consumed(
+            [int(row["id"]) for row in pending_directives],
+            qid,
+        )
         ConsoleFormatter.print_summary(
             qid, parsed.problem_type, final_state, correctness, note)
         return qid
@@ -2131,8 +2549,12 @@ class ExamPipeline:
         return answer not in {"stop", "s", "n", "no", "q", "quit"}
 
     # ------------------------------------------------------------------
-    def _stage_programming(self, qid: int,
-                           parsed: ParsedQuestion) -> Tuple[QuestionState, str, str]:
+    def _stage_programming(
+        self,
+        qid: int,
+        parsed: ParsedQuestion,
+        directive_rows: Optional[List[sqlite3.Row]] = None,
+    ) -> Tuple[QuestionState, str, str]:
         self.db.set_state(qid, QuestionState.ANSWERING)
         ConsoleFormatter.print_state_transition(
             qid, QuestionState.PARSED.name, QuestionState.ANSWERING.name)
@@ -2145,10 +2567,16 @@ class ExamPipeline:
 
         attempts: List[CodeVersion] = []
         artifact_test_code: Optional[str] = None
-        auxiliary_files: Dict[str, str] = {}
+        artifact_auxiliary_files: Dict[str, str] = {}
         artifact_notes = ""
         lang = parsed.programming_language or "Python"
-        parsed_for_attempt = parsed
+        session_context = self._build_programming_session_context(
+            qid,
+            parsed,
+            directive_rows or [],
+        )
+        parsed_for_attempt = ParsedQuestion(**parsed.model_dump())
+        parsed_for_attempt.primary_solution_file = session_context.primary_solution_file
 
         max_attempts = MAX_SOLUTION_ATTEMPTS
         attempt = 0
@@ -2164,7 +2592,10 @@ class ExamPipeline:
                     "RE-GENERATING WITH FAILURE FEEDBACK")
             try:
                 solution = self.llm.generate_solution(
-                    parsed_for_attempt, self.session_images)
+                    parsed_for_attempt,
+                    self.session_images,
+                    session_context=session_context,
+                )
             except Exception as e:
                 ProvenanceLedger.record("solution_generation_error", {
                     "question_id": qid, "attempt": attempt, "error": str(e)})
@@ -2176,6 +2607,29 @@ class ExamPipeline:
                 break
 
             lang = solution.programming_language or parsed.programming_language or "Python"
+            primary_solution_file = (
+                solution.primary_solution_file
+                or parsed_for_attempt.primary_solution_file
+                or session_context.primary_solution_file
+            )
+            session_context.primary_solution_file = primary_solution_file
+            parsed_for_attempt.primary_solution_file = primary_solution_file
+
+            solution_support_files: Dict[str, str] = {}
+            for project_file in solution.project_files or []:
+                relative_path = Path(project_file.file_name)
+                if relative_path.is_absolute() or ".." in relative_path.parts:
+                    continue
+                if project_file.file_name == primary_solution_file:
+                    continue
+                solution_support_files[project_file.file_name] = project_file.content
+                self.db.add_generated_artifact(
+                    qid,
+                    project_file.file_name,
+                    "solution-support-file",
+                    f"attempt-{attempt}",
+                    project_file.content,
+                )
 
             # Prefer the freshest test code: each attempt may correct
             # OCR-corrupted expectations from the previous round.
@@ -2187,12 +2641,19 @@ class ExamPipeline:
                 )
             elif not artifact_test_code:
                 try:
-                    artifact_test_code, auxiliary_files, artifact_notes = self.artifact_builder.build(
-                        qid, parsed, self.session_images, solution.solution_code
+                    artifact_test_code, artifact_auxiliary_files, artifact_notes = self.artifact_builder.build(
+                        qid,
+                        parsed_for_attempt,
+                        self.session_images,
+                        solution.solution_code,
+                        session_context=session_context,
                     )
                 except Exception as e:
                     ProvenanceLedger.record("artifact_builder_warning", {
                         "question_id": qid, "attempt": attempt, "error": str(e)})
+
+            if not artifact_test_code and session_context.previous_verified_test_code:
+                artifact_test_code = session_context.previous_verified_test_code
 
             candidate = CodeVersion(attempt, solution.solution_code)
 
@@ -2201,9 +2662,16 @@ class ExamPipeline:
                 ConsoleFormatter.print_state_transition(
                     qid, QuestionState.ANSWERING.name, QuestionState.TESTING.name)
 
+            execution_files = dict(session_context.previous_generated_files)
+            execution_files.update(solution_support_files)
+            execution_files.update(artifact_auxiliary_files)
             try:
                 ok, output = CodeExecutor.run_python(
-                    candidate.code, artifact_test_code, auxiliary_files)
+                    candidate.code,
+                    artifact_test_code,
+                    execution_files,
+                    primary_solution_file=primary_solution_file,
+                )
             except Exception as e:
                 ok, output = False, f"[runner-exception] {e}"
             candidate.tests_passed = ok
@@ -2213,7 +2681,7 @@ class ExamPipeline:
                 candidate, language=lang,
                 header_title=f"SOLUTION (ATTEMPT {attempt}/{max_attempts})")
             self._deliver_answer(candidate.code,
-                                 f"Solution code (attempt {attempt})")
+                                 f"{primary_solution_file} (attempt {attempt})")
             attempts.append(candidate)
 
             if ok:
@@ -2235,6 +2703,12 @@ class ExamPipeline:
                         "artifact_notes": artifact_notes,
                         "required_runtime_artifacts": parsed.required_runtime_artifacts,
                         "visible_interfaces": parsed.visible_interfaces,
+                        "interface_style": parsed.interface_style,
+                        "primary_solution_file": primary_solution_file,
+                        "visible_project_files": parsed.visible_project_files,
+                        "editable_project_files": parsed.editable_project_files,
+                        "visible_test_files": parsed.visible_test_files,
+                        "previous_verified_question_id": session_context.previous_verified_question_id,
                     }))
                 self.db.set_state(qid, QuestionState.VERIFIED)
                 ConsoleFormatter.print_state_transition(
@@ -2250,6 +2724,7 @@ class ExamPipeline:
                 "output_preview": (candidate.test_output or "")[:2000],
             })
             parsed_for_attempt = self._augment_parsed_with_failure(parsed, attempts)
+            parsed_for_attempt.primary_solution_file = session_context.primary_solution_file
 
         self.db.update_question(qid,
             proposed_answer=attempts[-1].code if attempts else None,
@@ -2368,7 +2843,8 @@ def main() -> None:
             f"Provenance log:  {PROVENANCE_LOG}",
             f"Backend:         {'LOCAL (Ollama)' if PLAY_LOCAL else 'ONLINE (DeepSeek API)'}",
             f"OCR binary:      {ocr_binary}",
-            f"Capture key:     {CAPTURE_LABEL}  |  Process key:  {PROCESS_LABEL}  |  Quit: {QUIT_LABEL}",
+            f"Capture key:     {CAPTURE_LABEL}  |  Process key:  {PROCESS_LABEL}",
+            f"Directive key:   {DIRECTIVE_LABEL}  |  Quit: {QUIT_LABEL}",
         ]
         print(ConsoleFormatter._box(banner,
             title=" FULLTEST PIPELINE INITIALIZED ", color_title="\033[1;36m"))
@@ -2398,7 +2874,7 @@ def main() -> None:
             print(
                 "\n[INFO] macOS global hotkey monitor active (Quartz event tap with "
                 f"auto-recovery). {CAPTURE_LABEL}=Capture  {PROCESS_LABEL}=Process  "
-                f"{QUIT_LABEL}=Quit — detected from any app and any desktop/Space, "
+                f"{DIRECTIVE_LABEL}=Directive  {QUIT_LABEL}=Quit — detected from any app and any desktop/Space, "
                 "and suppressed so other apps never receive them."
             )
             print(
@@ -2408,7 +2884,8 @@ def main() -> None:
         else:
             print(
                 "\n[INFO] Global hotkey listener active. "
-                f"{CAPTURE_LABEL}=Capture  {PROCESS_LABEL}=Process  {QUIT_LABEL}=Quit."
+                f"{CAPTURE_LABEL}=Capture  {PROCESS_LABEL}=Process  "
+                f"{DIRECTIVE_LABEL}=Directive  {QUIT_LABEL}=Quit."
             )
 
         ConsoleFormatter.print_session_status(
@@ -2442,6 +2919,8 @@ def main() -> None:
                         pipeline.handle_capture()
                     elif action == "process":
                         pipeline.handle_process()
+                    elif action == "directive":
+                        pipeline.handle_add_directive()
                 finally:
                     action_queue.task_done()
 
@@ -2497,6 +2976,8 @@ def main() -> None:
                 )
                 # #endregion
                 enqueue_action("process")
+            elif action == "directive":
+                enqueue_action("directive")
 
         if sys.platform == "darwin":
             monitor = MacOSHotkeyMonitor(handle_hotkey_action)
@@ -2511,6 +2992,7 @@ def main() -> None:
                 pynput.keyboard.Key.f6: "capture",
                 pynput.keyboard.Key.f7: "process",
                 pynput.keyboard.Key.f8: "quit",
+                pynput.keyboard.Key.f9: "directive",
             }
 
             def on_press(key):
