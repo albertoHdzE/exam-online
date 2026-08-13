@@ -5,7 +5,7 @@
 - **Log File**: .dbg/trae-debug-log-screenshots-batch-parse.ndjson
 
 ## Reproduction Steps
-1. Use the existing screenshots in [screenshots](file:///Users/alberto/Documents/projects/exam-online/screenshots).
+1. Use the existing screenshots in the `screenshots/` directory.
 2. Run the application in a non-interactive batch mode against those files.
 3. Observe OCR extraction, duplicate decisions, parse classification, and answer generation.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# clean-env — reset the FullTest app to a pristine state for a new exam/test.
+# clean-env — reset the Homeostat Agent to a pristine state for a new run.
 #
 # Removes runtime artifacts only:
 #   - data/exam_online.db (+ -shm/-wal)   question/answer database

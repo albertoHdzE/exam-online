@@ -163,7 +163,7 @@ cython_debug/
 
 ignore/
 
-# FullTest runtime artifacts
+# Homeostat Agent runtime artifacts
 screenshots/
 data/
 temp_runs/exam_run_*/

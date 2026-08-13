@@ -2194,7 +2194,7 @@ class ExamPipeline:
             },
         )
         notify_user("Directive saved for the next processing run.",
-                    title="FullTest Directive Saved")
+                    title="Homeostat Directive Saved")
         print(
             f"\n\033[1;32m[DIRECTIVE SAVED]\033[0m Stored note #{directive_id} for the next process step."
         )
@@ -2258,7 +2258,7 @@ class ExamPipeline:
             self._ocr_queue.put(img)
             notify_user(
                 f"Captured #{len(self.session_images)} ({img.file_path.name})",
-                title="FullTest Capture",
+                title="Homeostat Capture",
             )
             ConsoleFormatter.print_session_status(
                 len(self.session_images),
@@ -2277,7 +2277,7 @@ class ExamPipeline:
         )
         # #endregion
         if not self.session_images:
-            notify_user("No screenshots captured yet.", title="FullTest Warning")
+            notify_user("No screenshots captured yet.", title="Homeostat Warning")
             print(f"\n\033[1;33m[WARN]\033[0m Press {CAPTURE_LABEL} first to capture at least one screenshot.")
             return
         try:
@@ -2297,7 +2297,7 @@ class ExamPipeline:
                     "and that your terminal has Screen Recording permission "
                     "(System Settings -> Privacy & Security -> Screen Recording)."
                 )
-                notify_user(warning, title="FullTest Warning")
+                notify_user(warning, title="Homeostat Warning")
                 print(f"\n\033[1;33m[WARN]\033[0m {warning}")
                 ProvenanceLedger.record("process_aborted_empty_ocr", {
                     "files": [str(i.file_path) for i in unique_images],
@@ -2317,12 +2317,12 @@ class ExamPipeline:
             # #endregion
             notify_user(
                 f"Processing {len(self.session_images)} shot(s) ({num_unique} unique)...",
-                title="FullTest AI Processing",
+                title="Homeostat AI Processing",
             )
             qid = self._run_pipeline()
             self.session_images = []
             notify_user(f"Question #{qid} complete.",
-                        title="FullTest Complete")
+                        title="Homeostat Complete")
             ConsoleFormatter.print_session_status(
                 0, f"session={self.session_id[:12]} | last Q=#{qid}")
         except Exception as e:
@@ -2493,7 +2493,7 @@ class ExamPipeline:
             print(f"\n\033[1;32m[CLIPBOARD]\033[0m {label} copied to clipboard — "
                   "paste it with Cmd+V (do NOT retype it; typos fail the tests).")
             notify_user(f"{label} copied to clipboard — paste with Cmd+V",
-                        title="FullTest Answer Ready")
+                        title="Homeostat Answer Ready")
 
     # ------------------------------------------------------------------
     def _stage_mc(self, qid: int,
@@ -2538,7 +2538,7 @@ class ExamPipeline:
             return False
         notify_user(
             f"Q{qid}: {num_failed} attempts failed — answer needed in the terminal to continue.",
-            "FullTest Input Needed")
+            "Homeostat Input Needed")
         print(f"\n\033[1;33m[PAUSED]\033[0m All {num_failed} attempts failed verification.")
         try:
             answer = input(
@@ -2825,7 +2825,7 @@ Return ONLY valid JSON of the form:
 
 def main() -> None:
     try:
-        parser = argparse.ArgumentParser(description="FullTest exam processing pipeline")
+        parser = argparse.ArgumentParser(description="Homeostat Agent problem-solving pipeline")
         parser.add_argument(
             "--process-existing",
             type=str,
@@ -2836,7 +2836,7 @@ def main() -> None:
         validate_runtime_compatibility()
         ocr_binary = configure_ocr_runtime()
         banner = [
-            "FULLTEST BRANCH  —  multi-shot capture · provenance DB · adaptive artifacts · sandboxed solution verification",
+            "HOMEOSTAT AGENT  —  multi-shot capture · provenance DB · adaptive artifacts · sandboxed solution verification",
             "",
             f"Screenshots dir: {SCREENSHOTS_DIR}",
             f"Database:        {DB_PATH}",
@@ -2847,7 +2847,7 @@ def main() -> None:
             f"Directive key:   {DIRECTIVE_LABEL}  |  Quit: {QUIT_LABEL}",
         ]
         print(ConsoleFormatter._box(banner,
-            title=" FULLTEST PIPELINE INITIALIZED ", color_title="\033[1;36m"))
+            title=" HOMEOSTAT AGENT INITIALIZED ", color_title="\033[1;36m"))
 
         pipeline = ExamPipeline()
 
