@@ -3,8 +3,9 @@ MAX_SOLUTION_ATTEMPTS), using a scripted fake LLM but the REAL code executor,
 pytest sandbox, database, and clipboard delivery."""
 
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "/Users/alberto/Documents/projects/exam-online")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from main import (ExamPipeline, ParsedQuestion, ProblemType, QuestionState,  # noqa: E402
                   SingleSolutionCode, MAX_SOLUTION_ATTEMPTS)

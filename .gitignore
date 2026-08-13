@@ -176,3 +176,6 @@ screenshot.png
 
 # Local debug tooling
 .dbg/
+
+# macOS
+.DS_Store

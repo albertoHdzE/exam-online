@@ -3,8 +3,9 @@ background worker, and the process-time drain (queue join) works."""
 
 import sys
 import time
+from pathlib import Path
 
-sys.path.insert(0, "/Users/alberto/Documents/projects/exam-online")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from main import ExamPipeline  # noqa: E402
 

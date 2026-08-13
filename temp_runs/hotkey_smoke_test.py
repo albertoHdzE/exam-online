@@ -11,8 +11,9 @@ real HID event stream and verifies end-to-end delivery.
 
 import sys
 import time
+from pathlib import Path
 
-sys.path.insert(0, "/Users/alberto/Documents/projects/exam-online")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import Quartz  # noqa: E402
 import HIServices  # noqa: E402

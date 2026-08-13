@@ -1,24 +1,21 @@
-# Gorilla Test Assistant 🦍
+# Gorilla Test Assistant
 
-This project provides an automated assistant for TestGorilla/CodeSignal-style assessments, demonstrating the potential limitations of traditional testing in the age of AI. This tool is specifically designed for macOS users.
-
-## Background
-
-For context on why this project was created, check out the blog post: [Pass any TestGorilla Assessment 🦍](https://your-blog-url-here.com)
+An automated assistant for TestGorilla/CodeSignal-style assessments, demonstrating the potential limitations of traditional testing in the age of AI. This tool is specifically designed for macOS users.
 
 ## Features
 
-- Global hotkeys (F6/F7/F8) monitored via a self-healing Quartz event tap — they keep working from any app and any desktop/Space, even after macOS disables the tap
+- Global hotkeys (F6/F7/F8/F9) monitored via a self-healing Quartz event tap — they keep working from any app and any desktop/Space, even after macOS disables the tap
 - Full-screen capture with Pillow; OCR via Tesseract runs in a background worker and is parallelized across CPU cores
 - Question parsing, answering, and solution generation via the DeepSeek API (screenshots are distilled to OCR text; irrelevant windows/UI chrome are filtered out at parse time)
 - Generated solutions are executed and tested in a sandboxed temp directory; failed attempts loop with failure feedback (up to 4 attempts) until tests pass
+- User directives (F9): free-form guidance notes that are attached to the next processing attempt, so you can steer the solver without editing code
 - Answers are copied straight to the macOS clipboard for exact pasting (no transcription typos)
 - Every question, answer, code version, and event is stored in a SQLite database plus an append-only provenance log
 
 ## Requirements
 
 - macOS (the global hotkey monitor and clipboard integration are macOS-only)
-- Python 3.13+ (3.13 requires pynput ≥ 1.8.1, already pinned)
+- Python 3.13+ (3.13 requires pynput >= 1.8.1, already pinned)
 - [Tesseract](https://formulae.brew.sh/formula/tesseract) OCR binary: `brew install tesseract`
 - A DeepSeek API key
 
@@ -62,6 +59,7 @@ For context on why this project was created, check out the blog post: [Pass any 
 3. When you encounter a question:
    - Press `F6` to capture a screenshot from anywhere on your Mac
    - Press `F7` to process the current screenshot batch (waits for background OCR, then parses, solves, and self-tests)
+   - Press `F9` to add a directive: the terminal prompts for a free-form note (e.g. "prefer an O(n log n) approach" or "the grader expects exactly two decimal places"). Pending directives are injected into the next `F7` processing attempt as guidance for the solver, then marked consumed. Directives steer approach, debugging, or emphasis; they do not override the problem statement.
    - Press `F8` to quit the listener
 
    Function keys are used so the hotkeys never collide with text you type into the exam interface. If your keyboard maps the F-keys to media functions, either press them together with `fn` or enable "Use F1, F2, etc. keys as standard function keys" in System Settings → Keyboard.
@@ -70,7 +68,7 @@ For context on why this project was created, check out the blog post: [Pass any 
 
    Notifications adapt to the machine automatically: on Intel Macs and Apple Silicon with Rosetta 2 they use pync/terminal-notifier; on Apple Silicon without Rosetta (where pync's Intel-only binary cannot run) the app falls back to native AppleScript notifications. The selected backend is printed at startup and requires no configuration.
 
-5. If the platform rejects an answer, capture the feedback screen with `F6` and press `F7` again: visible feedback (failed tests, grader messages) is parsed as task context for the next attempt.
+5. If the platform rejects an answer, capture the feedback screen with `F6` and press `F7` again: visible feedback (failed tests, grader messages) is parsed as task context for the next attempt. Combine this with an `F9` directive when you want to redirect the approach explicitly.
 
 ## Maintenance
 
