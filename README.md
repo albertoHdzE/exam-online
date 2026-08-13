@@ -1,6 +1,6 @@
 # Gorilla Test Assistant 🦍
 
-This project provides an automated assistant for TestGorilla assessments, demonstrating the potential limitations of traditional multiple-choice testing in the age of AI. This tool is specifically designed for macOS users.
+This project provides an automated assistant for TestGorilla/CodeSignal-style assessments, demonstrating the potential limitations of traditional testing in the age of AI. This tool is specifically designed for macOS users.
 
 ## Background
 
@@ -8,27 +8,44 @@ For context on why this project was created, check out the blog post: [Pass any 
 
 ## Features
 
-- Captures screen content on keypress using Pillow (PIL)
-- Analyzes multiple-choice questions using GPT-4 Vision via the Marvin library
-- Provides discreet answer notifications using pync
-- Monitors keyboard input with pynput
+- Global hotkeys (F6/F7/F8) monitored via a self-healing Quartz event tap — they keep working from any app and any desktop/Space, even after macOS disables the tap
+- Full-screen capture with Pillow; OCR via Tesseract runs in a background worker and is parallelized across CPU cores
+- Question parsing, answering, and solution generation via the DeepSeek API (screenshots are distilled to OCR text; irrelevant windows/UI chrome are filtered out at parse time)
+- Generated solutions are executed and tested in a sandboxed temp directory; failed attempts loop with failure feedback (up to 4 attempts) until tests pass
+- Answers are copied straight to the macOS clipboard for exact pasting (no transcription typos)
+- Every question, answer, code version, and event is stored in a SQLite database plus an append-only provenance log
+
+## Requirements
+
+- macOS (the global hotkey monitor and clipboard integration are macOS-only)
+- Python 3.13+ (3.13 requires pynput ≥ 1.8.1, already pinned)
+- [Tesseract](https://formulae.brew.sh/formula/tesseract) OCR binary: `brew install tesseract`
+- A DeepSeek API key
 
 ## Setup
 
 1. Clone the repository:
    ```
-   git clone https://github.com/your-username/gorilla-test-assistant.git
-   cd gorilla-test-assistant
+   git clone https://github.com/albertoHdzE/exam-online.git
+   cd exam-online
    ```
 
-2. Install dependencies:
+2. Create a virtual environment and install dependencies:
    ```
+   python3 -m venv venv
+   source venv/bin/activate
    pip install -r requirements.txt
    ```
 
-3. Ensure you have a valid OpenAI API key and set it as an environment variable:
+3. Provide your DeepSeek API key in a `.env` file (see `.env.example`):
    ```
-   export OPENAI_API_KEY='your-api-key-here'
+   cp .env.example .env
+   # edit .env and set DEEPSEEK_API_KEY=...
+   ```
+
+4. Install the OCR binary if you haven't:
+   ```
+   brew install tesseract
    ```
 
 ## Usage
@@ -38,9 +55,28 @@ For context on why this project was created, check out the blog post: [Pass any 
    python main.py
    ```
 
-2. When you encounter a multiple-choice question:
-   - Press the left Alt key
-   - Wait for the notification with the suggested answer
+2. On first run, macOS will ask for permissions for the terminal app — grant both, then fully quit and relaunch the terminal:
+   - **Accessibility** (System Settings → Privacy & Security → Accessibility) — required for global hotkeys
+   - **Screen Recording** (same panel) — required for screenshots to contain window content
+
+3. When you encounter a question:
+   - Press `F6` to capture a screenshot from anywhere on your Mac
+   - Press `F7` to process the current screenshot batch (waits for background OCR, then parses, solves, and self-tests)
+   - Press `F8` to quit the listener
+
+   Function keys are used so the hotkeys never collide with text you type into the exam interface. If your keyboard maps the F-keys to media functions, either press them together with `fn` or enable "Use F1, F2, etc. keys as standard function keys" in System Settings → Keyboard.
+
+4. The final answer is placed on your clipboard automatically — paste it into the exam with Cmd+V instead of retyping it.
+
+   Notifications adapt to the machine automatically: on Intel Macs and Apple Silicon with Rosetta 2 they use pync/terminal-notifier; on Apple Silicon without Rosetta (where pync's Intel-only binary cannot run) the app falls back to native AppleScript notifications. The selected backend is printed at startup and requires no configuration.
+
+5. If the platform rejects an answer, capture the feedback screen with `F6` and press `F7` again: visible feedback (failed tests, grader messages) is parsed as task context for the next attempt.
+
+## Maintenance
+
+- `./clean-env` resets the app to a pristine state (deletes the database, provenance log, screenshots, sandbox runs, and caches; asks for confirmation, `-y` skips it). State is recreated automatically on the next run.
+- Runtime artifacts live in `screenshots/`, `data/`, and `temp_runs/` — all git-ignored.
+- Verification helper scripts (require the venv): `temp_runs/hotkey_smoke_test.py`, `temp_runs/async_capture_test.py`, `temp_runs/iterative_loop_test.py`.
 
 ## Important Notes
 

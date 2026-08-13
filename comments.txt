@@ -1,0 +1,40 @@
+source: https://www.reddit.com/r/Anthropic/comments/1qovmbs/assessment_for_anthropic_fellows_program_for_ai/
+When I did it it was a 4 part exercise where you have to maintain accounts in a fake bank . 
+Each step they add more complications like track balance then add scheduled transactions 
+then calculate interest. You have to have a solid design from the beginning so you 
+won't have to refactor later. I got tripped up trying to remember how to handle 
+python dataclasses so definitely get some practice on basic data structures , 
+maps, lists, list comprehension etc. The codesignal industry practice exam was a good introduction
+
+Source google:
+Common Problem Types & Levels The test measures your ability to write modular, maintainable 
+code using basic data structures (maps, lists, list comprehensions) and classes. 
+Two specific problem blueprints dominate the 2026 assessments:
+1. The In-Memory Key-Value DatabaseLevel 
+1 (Basic Operations): Implement standard SET, GET, and DELETE commands.
+Level 2 (Scans & Queries): Add filtering mechanics, such as scanning for 
+prefixes or processing range queries.
+Level 3 (TTL Logic): Implement Time-To-Live (TTL) functionality, ensuring 
+data expires automatically after a specified timestamp.
+Level 4 (Advanced Patterns): Introduce backup states, transaction rollbacks, 
+or memory compression.
+2. The Banking Ledger SystemLevel 
+1 (Accounts): Create user accounts, deposit funds, and verify current balances.
+Level 2 (Transfers): Process funds transfers between separate accounts while 
+handling overdraft errors.Level 
+3 (Ledger Audits): Retrieve transaction histories filtered by specific 
+date ranges or payment types.
+Level 4 (Scheduling): Introduce automated recurring payments or cashback processing rules.
+
+High-Yield Strategies to PassDesign for Expansion: Do not write messy, monolithic 
+blocks of code for Level 1. Organize your data inside logical helper functions, 
+data classes, or dictionary mappings so that adding Level 3 and 4 requirements 
+doesn't force a full refactor. Prioritize Correctness Over Early Optimization: This test should 
+simulat that it tracks your incremental code velocity and test case completion. 
+Solve the tasks cleanly to get the base points first, then optimize 
+the execution speed only if a test case explicitly times out.
+
+
+This is the type of situations this porject have to handle:
+https://support.codesignal.com/hc/en-us/articles/360051960134-General-Coding-Assessment-GCA-Rules-and-Setup
+
